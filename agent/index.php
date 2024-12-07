@@ -11,6 +11,7 @@
  * 5. 数据存储：使用SQLite存储所有监控数据，并对关键数据进行加密存储
  * 6. 远程通信：支持将事件上报到远程服务器（支持HTTP/HTTPS）
  * 7. 日志清理：定期清理超过30天的历史日志
+ * 8. 漏洞信息：收集系统组件的版本和软件版本信息，并上报给服务器以进行漏洞扫描
  */
 
 class HIDSAgent
@@ -40,6 +41,159 @@ class HIDSAgent
             message TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )");
+    }
+
+    public function baselineCheck()
+    {
+        $osVersion = php_uname();
+        $results = [];
+
+        // 密码策略检查
+        $results['password_policy'] = $this->checkPasswordPolicy();
+
+        // 用户管理检查
+        $results['user_management'] = $this->checkUserManagement();
+
+        // 服务管理检查
+        $results['service_management'] = $this->checkServiceManagement();
+
+        // 防火墙配置检查
+        $results['firewall'] = $this->checkFirewallConfiguration();
+
+        // 文件系统权限检查
+        $results['file_permissions'] = $this->checkFilePermissions();
+
+        // 系统更新检查
+        $results['system_updates'] = $this->checkSystemUpdates();
+
+        // 日志审计检查
+        $results['log_auditing'] = $this->checkLogAuditing();
+
+        // 记录基线检查结果
+        $this->logEvent('baseline_check', json_encode($results));
+    }
+
+    private function checkPasswordPolicy()
+    {
+        $policy = [];
+        if (strpos(php_uname(), 'Ubuntu') !== false || strpos(php_uname(), 'Debian') !== false) {
+            exec('grep -E "PASS_MAX_DAYS|PASS_MIN_DAYS|PASS_WARN_AGE|PASS_MIN_LEN" /etc/login.defs', $output);
+        } elseif (strpos(php_uname(), 'CentOS') !== false || strpos(php_uname(), 'Red Hat') !== false) {
+            exec('grep -E "PASS_MAX_DAYS|PASS_MIN_DAYS|PASS_WARN_AGE|PASS_MIN_LEN" /etc/login.defs', $output);
+        }
+        foreach ($output as $line) {
+            list($key, $value) = explode(' ', $line, 2);
+            $policy[$key] = trim($value);
+        }
+        return $policy;
+    }
+
+    private function checkUserManagement()
+    {
+        $users = [];
+        exec('cat /etc/passwd', $output);
+        foreach ($output as $line) {
+            list($username, $password, $uid, $gid, $gecos, $home, $shell) = explode(':', $line);
+            if ($username === 'root' && $shell === '/bin/bash') {
+                $users['root_shell'] = 'bash';
+            }
+        }
+        return $users;
+    }
+
+    private function checkServiceManagement()
+    {
+        $services = [];
+        if (strpos(php_uname(), 'Ubuntu') !== false || strpos(php_uname(), 'Debian') !== false) {
+            exec('systemctl list-units --type=service --state=running', $output);
+        } elseif (strpos(php_uname(), 'CentOS') !== false || strpos(php_uname(), 'Red Hat') !== false) {
+            exec('systemctl list-units --type=service --state=running', $output);
+        }
+        foreach ($output as $line) {
+            $services[] = trim($line);
+        }
+        return $services;
+    }
+
+    private function checkFirewallConfiguration()
+    {
+        $firewall = [];
+        if (strpos(php_uname(), 'Ubuntu') !== false || strpos(php_uname(), 'Debian') !== false) {
+            exec('ufw status', $output);
+        } elseif (strpos(php_uname(), 'CentOS') !== false || strpos(php_uname(), 'Red Hat') !== false) {
+            exec('firewall-cmd --state', $output);
+        }
+        foreach ($output as $line) {
+            $firewall[] = trim($line);
+        }
+        return $firewall;
+    }
+
+    private function checkFilePermissions()
+    {
+        $permissions = [];
+        exec('ls -ld /etc/shadow /etc/passwd /etc/sudoers', $output);
+        foreach ($output as $line) {
+            list($perms, $links, $owner, $group, $size, $month, $day, $time, $file) = preg_split('/\s+/', $line, 9);
+            $permissions[$file] = $perms;
+        }
+        return $permissions;
+    }
+
+    private function checkSystemUpdates()
+    {
+        $updates = [];
+        if (strpos(php_uname(), 'Ubuntu') !== false || strpos(php_uname(), 'Debian') !== false) {
+            exec('apt-get update && apt-get upgrade --dry-run', $output);
+        } elseif (strpos(php_uname(), 'CentOS') !== false || strpos(php_uname(), 'Red Hat') !== false) {
+            exec('yum check-update', $output);
+        }
+        foreach ($output as $line) {
+            $updates[] = trim($line);
+        }
+        return $updates;
+    }
+
+    private function checkLogAuditing()
+    {
+        $auditing = [];
+        exec('cat /etc/rsyslog.conf | grep -v "^#" | grep -v "^$" | grep -E "auth\.log|secure"', $output);
+        foreach ($output as $line) {
+            $auditing[] = trim($line);
+        }
+        return $auditing;
+    }
+
+    /**
+     * 收集服务器的组件版本信息和已安装软件的版本信息
+     */
+    public function collectSoftwareVersions()
+    {
+        $softwareVersions = [];
+
+        // 获取操作系统版本
+        $osVersion = php_uname();
+        $softwareVersions['os_version'] = $osVersion;
+
+        // 根据不同的操作系统执行不同的命令
+        if (strpos($osVersion, 'Ubuntu') !== false || strpos($osVersion, 'Debian') !== false) {
+            // 使用 dpkg-query 命令获取已安装软件的版本信息（适用于 Debian/Ubuntu 系统）
+            exec('dpkg-query -W -f=\'${Package} ${Version}\n\'', $dpkgOutput);
+            foreach ($dpkgOutput as $line) {
+                list($package, $version) = explode(' ', $line, 2);
+                $softwareVersions['installed_software'][$package] = trim($version);
+            }
+        } elseif (strpos($osVersion, 'CentOS') !== false || strpos($osVersion, 'Red Hat') !== false) {
+            // 使用 rpm 命令获取已安装软件的版本信息（适用于 CentOS/RHEL 系统）
+            exec('rpm -qa --queryformat="%{NAME} %{VERSION}\n"', $rpmOutput);
+            foreach ($rpmOutput as $line) {
+                list($package, $version) = explode(' ', $line, 2);
+                $softwareVersions['installed_software'][$package] = trim($version);
+            }
+        }
+
+        // 将收集到的信息存储到数据库中
+        $this->logEvent('software_versions', json_encode($softwareVersions));
     }
 
     /**
@@ -176,12 +330,12 @@ class HIDSAgent
 
         $options = [
             'http' => [
-                'header'  => "Content-Type: application/json",
-                'method'  => 'POST',
+                'header' => "Content-Type: application/json",
+                'method' => 'POST',
                 'content' => json_encode($data)
             ]
         ];
-        $context  = stream_context_create($options);
+        $context = stream_context_create($options);
         file_get_contents($this->serverUrl, false, $context);
     }
 
@@ -196,6 +350,8 @@ class HIDSAgent
             $this->monitorLogFiles();
             $this->checkFileIntegrity();
             $this->reportToServer();
+            $this->collectSoftwareVersions(); // 添加此行以定期收集软件版本信息
+            $this->baselineCheck(); // 添加此行以定期进行基线检查
             sleep(60); // 每60秒监控一次
         }
     }
